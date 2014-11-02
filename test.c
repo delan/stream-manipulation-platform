@@ -3,99 +3,110 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/ip.h>
+#include <string.h>
 
 #include "pluginloader.h"
 #include "eventmanager.h"
+#include "sockets.h"
+#include "buffermanager.h"
 
-char buffer[1024];
-int buffer_len = 0;
+#include "debug.h"
 
-event stdin_event;
-event stdout_event;
-
-int read_ready(event e, struct event_info *info)
+static void data_available(smpsocket s, struct socket_info *info)
 {
-    if(sizeof(buffer) == buffer_len)
-        return EV_READ_PENDING;
-    int len = read(info->fd, buffer+buffer_len, sizeof(buffer)-buffer_len);
-    if(len == 0)
+    DPRINTF("data available!\n");
+    buffer *b;
+    while((b = socket_read_buffer(s)))
     {
-        fprintf(stderr, "end of stream!\n");
-        event_deregister(e);
-        return EV_DONE;
+        DPRINTF("writing buffer\n");
+        socket_write_buffer(s, b);
     }
-    if(len == -1)
+
+    if(socket_eof(s))
+        socket_send_eof(s);
+}
+
+static void on_free(smpsocket s, struct socket_info *info)
+{
+    DPRINTF("socket is being freed!\n");
+}
+
+static int accept_callback(event e, struct event_info *info)
+{
+    DPRINTF("accepting client\n");
+    struct sockaddr_in client;
+    socklen_t sockaddr_len = sizeof(client);
+    int fd = accept(info->fd, (struct sockaddr*)&client, &sockaddr_len);
+    if(fd == -1)
     {
-        if(errno == EWOULDBLOCK || errno == EAGAIN)
+        if(errno == EAGAIN || errno == EWOULDBLOCK)
         {
             return EV_DONE;
         }
+        if(errno == ECONNABORTED)
+        {
+            return EV_READ_PENDING;
+        }
+        DPRINTF("error accepting connection: %s (%d)\n", strerror(errno), errno);
         event_deregister(e);
         return EV_DONE;
     }
-    buffer_len += len;
-    
-    event_modify(stdout_event, EV_ADD | EV_WRITE);
 
-    return EV_READ_PENDING | EV_WRITE_PENDING;
-}
+    struct socket_info sock_info = {
+        .sock_fd = fd,
+        .context = NULL,
+        .data_available = data_available,
+        .on_free = on_free,
+    };
 
-int write_ready(event e, struct event_info *info)
-{
-    fprintf(stderr, "write_ready\n");
-    if(buffer_len == 0)
-    {
-        fprintf(stderr, "removing EPOLLOUT watch\n");
-        event_modify(e, EV_REMOVE | EV_WRITE);
-        return EV_DONE;
-    }
-    int result = write(1, buffer, buffer_len);
-    if(result == -1)
-    {
-        return EV_DONE;
-    }
-    buffer_len -= result;
-    memmove(buffer, buffer+result, buffer_len);
-    return EV_WRITE_PENDING;
-}
-
-int exception(event e, struct event_info *info)
-{
-    fprintf(stderr, "exception!\n");
-    return EV_DONE;
+    socket_new(&sock_info);
+    return EV_READ_PENDING;
 }
 
 int main(int argc, char *argv[])
 {
     eventmanager_init();
 
-    struct event_info info_stdin = {
-        .fd = 0,
+    int sfd = socket(AF_INET, SOCK_STREAM, 0);
+    if(sfd == -1)
+    {
+        DPRINTF("socket() failed: %s (%d)\n", strerror(errno), errno);
+        return 1;
+    }
+    struct sockaddr_in self = {
+        .sin_family = AF_INET,
+        .sin_port = htons(9000),
+        .sin_addr = { INADDR_ANY },
+    };
+    if(bind(sfd, (const struct sockaddr*)&self, sizeof(self)) == -1)
+    {
+        DPRINTF("bind() failed: %s (%d)\n", strerror(errno), errno);
+        return 1;
+    }
+    if(listen(sfd, 8) == -1)
+    {
+        DPRINTF("listen() failed: %s (%d)\n", strerror(errno), errno);
+    }
+
+    fcntl(sfd, F_SETFL, fcntl(sfd, F_GETFL, 0) | O_NONBLOCK);
+
+    struct event_info info = {
+        .fd = sfd,
         .events = EV_READ | EV_EXCEPT,
         .context = NULL,
-        .read = read_ready,
+        .read = accept_callback,
         .write = NULL,
-        .except = exception,
+        .except = NULL,
     };
-    int flags = fcntl(0, F_GETFL, 0);
-    fcntl(0, F_SETFL, flags | O_NONBLOCK);
-    struct event_info info_stdout = {
-        .fd = 1,
-        .events = EV_EXCEPT,
-        .context = NULL,
-        .read = NULL,
-        .write = write_ready,
-        .except = exception,
-    };
-    flags = fcntl(1, F_GETFL, 0);
-    fcntl(1, F_SETFL, flags | O_NONBLOCK);
 
-    printf("registering event: %s\n", eventmanager_strerror(event_register(&info_stdin, &stdin_event)));
-    printf("registering event: %s\n", eventmanager_strerror(event_register(&info_stdout, &stdout_event)));
+    event e;
+    DPRINTF("event_register: %s\n", eventmanager_strerror(event_register(&info, &e)));
 
     while(1)
     {
         eventmanager_tick(1000);
-        fprintf(stderr, "'");
+        DPRINTF("'\n");
     }
 }

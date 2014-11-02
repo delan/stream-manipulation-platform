@@ -6,16 +6,22 @@
 
 #include "eventmanager.h"
 
+#include "debug.h"
+
 struct event
 {
     struct list_head list;
+    struct list_head pending_removal;
+    struct list_head pending_read;
+    struct list_head pending_write;
     struct event_info info;
-    int pending_removal;
-    int pending_read;
-    int pending_write;
 };
 
 static LIST_HEAD(events);
+
+static LIST_HEAD(pending_read);
+static LIST_HEAD(pending_write);
+static LIST_HEAD(pending_removal);
 
 static int epoll_fd = -1;
 
@@ -54,11 +60,14 @@ static inline char check_initialized(void)
 
 int event_register(struct event_info *event_info, struct event **event)
 {
-    if(!check_initialized)
+    if(!check_initialized())
         return EVENTMGR_NOT_INITIALIZED;
 
     struct event *e = (struct event*)malloc(sizeof(struct event));
-    memcpy(&e->info, event_info, sizeof(*event_info));
+    e->info = *event_info;
+    INIT_LIST_HEAD(&e->pending_read);
+    INIT_LIST_HEAD(&e->pending_write);
+    INIT_LIST_HEAD(&e->pending_removal);
 
     struct epoll_event epoll_event;
     epoll_event.events = EPOLLET;
@@ -75,12 +84,13 @@ int event_register(struct event_info *event_info, struct event **event)
     }
     *event = e;
     list_add(&e->list, &events);
+
     return EVENTMGR_SUCCESS;
 }
 
 int event_modify(struct event *event, int events)
 {
-    if(!check_initialized)
+    if(!check_initialized())
         return EVENTMGR_NOT_INITIALIZED;
 
     struct event_info *event_info = &event->info;
@@ -88,12 +98,23 @@ int event_modify(struct event *event, int events)
     int action = events & EV_CTL_MASK;
     events &= EV_MASK;
 
+    int orig_events = event_info->events;
     if(action == EV_ADD)
         event_info->events |= events;
     else if(action == EV_REMOVE)
         event_info->events &= ~events;
     else if(action == EV_SET)
         event_info->events = events;
+
+    /* guarantee 'write' gets called initially (epoll documentation is unclear on this) */
+    if(event_info->events & EV_WRITE && list_empty(&event->pending_write))
+        list_add_tail(&event->pending_write, &pending_write);
+
+    /* if there's no change, don't waste a syscall */
+    if(orig_events == event_info->events)
+        return EVENTMGR_SUCCESS;
+
+    DPRINTF("Modifying EPOLL\n");
 
     struct epoll_event epoll_event;
     epoll_event.events = EPOLLET;
@@ -113,10 +134,11 @@ int event_modify(struct event *event, int events)
 
 int event_deregister(struct event *event)
 {
-    if(!check_initialized)
+    if(!check_initialized())
         return EVENTMGR_NOT_INITIALIZED;
 
-    event->pending_removal = 1;
+    if(list_empty(&event->pending_removal))
+        list_add_tail(&event->pending_removal, &pending_removal);
     if(!epoll_ctl(epoll_fd, EPOLL_CTL_DEL, event->info.fd, NULL) == -1)
     {
         return EVENTMGR_EPOLL_DEL_FAILED;
@@ -127,41 +149,48 @@ int event_deregister(struct event *event)
 static int trigger_event(event e, int (*callback)(event e, struct event_info*))
 {
     int result = callback(e, &e->info);
-    if(result & EV_READ_PENDING)
-        e->pending_read = 1;
+    if((result & EV_READ_PENDING))
+    {
+        if(list_empty(&e->pending_read))
+            list_add(&e->pending_read, &pending_read);
+    }
     else if(callback == e->info.read)
-        e->pending_read = 0;
-    if(result & EV_WRITE_PENDING)
-        e->pending_write = 1;
+        list_del_init(&e->pending_read);
+    if((result & EV_WRITE_PENDING))
+    {
+        if(list_empty(&e->pending_write))
+            list_add(&e->pending_write, &pending_write);
+    }
     else if(callback == e->info.write)
-        e->pending_write = 0;
+        list_del_init(&e->pending_write);
 
     return result;
 }
 
 int eventmanager_tick(int milliseconds)
 {
-    if(!check_initialized)
+    if(!check_initialized())
         return EVENTMGR_NOT_INITIALIZED;
 
     struct event *x, *y;
     int pending = 0;
-    list_for_each_entry_safe(x, y, &events, list)
+    list_for_each_entry_safe(x, y, &pending_removal, pending_removal)
     {
-        if(x->pending_removal)
-        {
-            list_del(&x->list);
-            free(x);
-            continue;
-        }
-        if(x->pending_read && x->info.events & EV_READ)
-        {
+        list_del(&x->pending_removal);
+        list_del(&x->pending_read);
+        list_del(&x->pending_write);
+        list_del(&x->list);
+        free(x);
+    }
+    list_for_each_entry_safe(x, y, &pending_read, pending_read)
+    {
+        if(x->info.events & EV_READ)
             pending |= trigger_event(x, x->info.read);
-        }
-        if(x->pending_write && x->info.events & EV_WRITE)
-        {
+    }
+    list_for_each_entry_safe(x, y, &pending_write, pending_write)
+    {
+        if(x->info.events & EV_WRITE)
             pending |= trigger_event(x, x->info.write);
-        }
     }
 
     /* if something somewhere is pending, no sleep */
@@ -180,27 +209,25 @@ int eventmanager_tick(int milliseconds)
         return EVENTMGR_EPOLL_WAIT_FAILED;
     }
     int i;
+    DPRINTF("ready_count: %d\n", ready_count);
     for(i = 0;i < ready_count;i++)
     {
         struct event *e = (struct event*)events[i].data.ptr;
-        struct event_info *info = &e->info;
-        if(e->pending_removal == 1)
-        {
-            list_del(&e->list);
-            free(e);
-            continue;
-        }
-
-        /* here we squash events that are already marked as pending,
-           as they will have already been called in the pre-epoll loop. */
 
         int event_flags = events[i].events;
-        if(event_flags == EPOLLIN && info->read && !e->pending_read)
-            trigger_event(e, info->read);
-        if(event_flags == EPOLLOUT && info->write && !e->pending_write)
-            trigger_event(e, info->write);
-        if(event_flags == EPOLLERR && info->except)
-            trigger_event(e, info->except);
+        if(event_flags & EPOLLIN && list_empty(&e->pending_read))
+        {
+            list_add(&e->pending_read, &pending_read);
+        }
+        if(event_flags & EPOLLOUT && list_empty(&e->pending_write))
+        {
+            list_add(&e->pending_write, &pending_write);
+        }
+        if(event_flags & EPOLLERR && e->info.except)
+        {
+            trigger_event(e, e->info.except);
+        }
     }
     return EVENTMGR_SUCCESS;
 }
+

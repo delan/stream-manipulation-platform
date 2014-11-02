@@ -255,4 +255,10 @@ static inline void *__list_find(struct list_head *head, size_t offset, char (*eq
 #define list_find(type, member, head, equality_func, context)    \
     __list_find(head, (unsigned long)(&((type *)0)->member), (char(*)(void*,void*))equality_func, context)
 
+#define list_first(type, head, member) \
+    list_entry((head)->next, type, member)
+
+#define list_tail(type, head, member) \
+    list_entry((head)->prev, type, member)
+
 #endif
