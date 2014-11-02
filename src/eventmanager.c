@@ -190,10 +190,14 @@ int eventmanager_tick(int milliseconds)
             free(e);
             continue;
         }
+
+        /* here we squash events that are already marked as pending,
+           as they will have already been called in the pre-epoll loop. */
+
         int event_flags = events[i].events;
-        if(event_flags == EPOLLIN && info->read)
+        if(event_flags == EPOLLIN && info->read && !e->pending_read)
             trigger_event(e, info->read);
-        if(event_flags == EPOLLOUT && info->write)
+        if(event_flags == EPOLLOUT && info->write && !e->pending_write)
             trigger_event(e, info->write);
         if(event_flags == EPOLLERR && info->except)
             trigger_event(e, info->except);

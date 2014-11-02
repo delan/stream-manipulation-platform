@@ -45,17 +45,18 @@ int write_ready(event e, struct event_info *info)
     fprintf(stderr, "write_ready\n");
     if(buffer_len == 0)
     {
-        //event_modify(e, EV_REMOVE | EV_WRITE);
+        fprintf(stderr, "removing EPOLLOUT watch\n");
+        event_modify(e, EV_REMOVE | EV_WRITE);
         return EV_DONE;
     }
-    int result = 1; //write(1, buffer, 1);
+    int result = write(1, buffer, buffer_len);
     if(result == -1)
     {
         return EV_DONE;
     }
     buffer_len -= result;
     memmove(buffer, buffer+result, buffer_len);
-    return EV_DONE;
+    return EV_WRITE_PENDING;
 }
 
 int exception(event e, struct event_info *info)
