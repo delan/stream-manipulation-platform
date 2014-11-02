@@ -7,48 +7,70 @@
 #include "pluginloader.h"
 #include "eventmanager.h"
 
-void read_ready(event e, struct event_info *info)
-{
-    char buffer[1024];
+char buffer[1024];
+int buffer_len = 0;
 
-    while(1)
+event stdin_event;
+event stdout_event;
+
+int read_ready(event e, struct event_info *info)
+{
+    if(sizeof(buffer) == buffer_len)
+        return EV_READ_PENDING;
+    int len = read(info->fd, buffer+buffer_len, sizeof(buffer)-buffer_len);
+    if(len == 0)
     {
-        int len = read(info->fd, buffer, sizeof(buffer));
-        if(len == 0)
-        {
-            printf("end of stream!\n");
-            event_deregister(e);
-            return;
-        }
-        if(len == -1)
-        {
-            if(errno == EWOULDBLOCK || errno == EAGAIN)
-            {
-                return;
-            }
-            event_deregister(e);
-            return;
-        }
-        write(1, buffer, len);
+        fprintf(stderr, "end of stream!\n");
+        event_deregister(e);
+        return EV_DONE;
     }
+    if(len == -1)
+    {
+        if(errno == EWOULDBLOCK || errno == EAGAIN)
+        {
+            return EV_DONE;
+        }
+        event_deregister(e);
+        return EV_DONE;
+    }
+    buffer_len += len;
+    
+    event_modify(stdout_event, EV_ADD | EV_WRITE);
+
+    return EV_READ_PENDING | EV_WRITE_PENDING;
 }
 
-void write_ready(event e, struct event_info *info)
+int write_ready(event e, struct event_info *info)
 {
-    fprintf(stderr, "write on stdin!?\n");
+    fprintf(stderr, "write_ready\n");
+    if(buffer_len == 0)
+    {
+        //event_modify(e, EV_REMOVE | EV_WRITE);
+        return EV_DONE;
+    }
+    int result = 1; //write(1, buffer, 1);
+    if(result == -1)
+    {
+        return EV_DONE;
+    }
+    buffer_len -= result;
+    memmove(buffer, buffer+result, buffer_len);
+    return EV_DONE;
 }
 
-void exception(event e, struct event_info *info)
+int exception(event e, struct event_info *info)
 {
     fprintf(stderr, "exception!\n");
+    return EV_DONE;
 }
 
 int main(int argc, char *argv[])
 {
     eventmanager_init();
 
-    struct event_info info = {
+    struct event_info info_stdin = {
         .fd = 0,
+        .events = EV_READ | EV_EXCEPT,
         .context = NULL,
         .read = read_ready,
         .write = NULL,
@@ -56,14 +78,23 @@ int main(int argc, char *argv[])
     };
     int flags = fcntl(0, F_GETFL, 0);
     fcntl(0, F_SETFL, flags | O_NONBLOCK);
+    struct event_info info_stdout = {
+        .fd = 1,
+        .events = EV_EXCEPT,
+        .context = NULL,
+        .read = NULL,
+        .write = write_ready,
+        .except = exception,
+    };
+    flags = fcntl(1, F_GETFL, 0);
+    fcntl(1, F_SETFL, flags | O_NONBLOCK);
 
-    event e;
-    int result = event_register(&info, &e);
-    printf("event_register: %s\n", eventmanager_strerror(result));
+    printf("registering event: %s\n", eventmanager_strerror(event_register(&info_stdin, &stdin_event)));
+    printf("registering event: %s\n", eventmanager_strerror(event_register(&info_stdout, &stdout_event)));
 
     while(1)
     {
         eventmanager_tick(1000);
-        write(1, ".", 1);
+        fprintf(stderr, "'");
     }
 }
