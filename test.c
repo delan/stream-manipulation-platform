@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <netinet/ip.h>
 #include <string.h>
+#include <signal.h>
 
 #include "pluginloader.h"
 #include "eventmanager.h"
@@ -65,6 +66,12 @@ static int accept_callback(event e, struct event_info *info)
     return EV_READ_PENDING;
 }
 
+int quit = 0;
+void sigint_handler(int sig)
+{
+    quit = 1;
+}
+
 int main(int argc, char *argv[])
 {
     eventmanager_init();
@@ -104,9 +111,18 @@ int main(int argc, char *argv[])
     event e;
     DPRINTF("event_register: %s\n", eventmanager_strerror(event_register(&info, &e)));
 
-    while(1)
+    signal(SIGINT, sigint_handler);
+
+    while(!quit)
     {
         eventmanager_tick(1000);
         DPRINTF("'\n");
     }
+
+    event_deregister(e);
+    socket_free_all();
+    buffer_garbage_collect(0);
+    eventmanager_cleanup();
+
+    return 0;
 }

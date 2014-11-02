@@ -231,3 +231,19 @@ int eventmanager_tick(int milliseconds)
     return EVENTMGR_SUCCESS;
 }
 
+void eventmanager_cleanup()
+{
+    if(!check_initialized())
+        return;
+
+    event i, j;
+    list_for_each_entry_safe(i, j, &pending_removal, pending_removal)
+    {
+        list_del(&i->pending_removal);
+        list_del(&i->pending_read);
+        list_del(&i->pending_write);
+        list_del(&i->list);
+        free(i);
+    }
+}
+
