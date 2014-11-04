@@ -7,6 +7,7 @@
 #include <netinet/ip.h>
 #include <string.h>
 #include <signal.h>
+#include <stdlib.h>
 
 #include "pluginloader.h"
 #include "eventmanager.h"
@@ -74,6 +75,11 @@ void sigint_handler(int sig)
 
 int main(int argc, char *argv[])
 {
+    if(argc != 2)
+    {
+        fprintf(stderr, "Usage: %s <port>\n", argv[0]);
+        return 1;
+    }
     eventmanager_init();
 
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -84,7 +90,7 @@ int main(int argc, char *argv[])
     }
     struct sockaddr_in self = {
         .sin_family = AF_INET,
-        .sin_port = htons(9000),
+        .sin_port = htons(atoi(argv[1])),
         .sin_addr = { INADDR_ANY },
     };
     if(bind(sfd, (const struct sockaddr*)&self, sizeof(self)) == -1)
@@ -109,14 +115,14 @@ int main(int argc, char *argv[])
     };
 
     event e;
-    DPRINTF("event_register: %s\n", eventmanager_strerror(event_register(&info, &e)));
+    event_register(&info, &e);
 
     signal(SIGINT, sigint_handler);
 
     while(!quit)
     {
         eventmanager_tick(1000);
-        DPRINTF("'\n");
+        buffer_garbage_collect(60);
     }
 
     event_deregister(e);

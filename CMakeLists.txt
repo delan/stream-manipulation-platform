@@ -10,7 +10,7 @@ include_directories ("${PROJECT_SOURCE_DIR}/includes")
 set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
 
-add_definitions( -D__DEBUG__ )
+# add_definitions( -D__DEBUG__ )
 
 add_subdirectory("src")
 add_executable(testing test.c)

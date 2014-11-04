@@ -149,6 +149,10 @@ int event_deregister(struct event *event)
 static int trigger_event(event e, int (*callback)(event e, struct event_info*))
 {
     int result = callback(e, &e->info);
+    if(result == EV_DONE)
+    {
+        DPRINTF("EV_DONE returned\n");
+    }
     if((result & EV_READ_PENDING))
     {
         if(list_empty(&e->pending_read))
@@ -204,12 +208,12 @@ int eventmanager_tick(int milliseconds)
             32,
             milliseconds);
 
+    DPRINTF("ready_count: %d\n", ready_count);
     if(ready_count == -1)
     {
         return EVENTMGR_EPOLL_WAIT_FAILED;
     }
     int i;
-    DPRINTF("ready_count: %d\n", ready_count);
     for(i = 0;i < ready_count;i++)
     {
         struct event *e = (struct event*)events[i].data.ptr;
