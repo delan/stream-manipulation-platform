@@ -15,69 +15,41 @@
 #define SOCKET_BUFFER_SIZE      (128*1024) // 128KiB
 #define SOCKET_DEFAULT_MAX_MEM  (1024*1024)
 
-struct socket
-{
-    struct list_head list;
-    struct socket_info info;
-    event event;
-    char eof:1,
-         write_closed:1;
-    struct list_head read_buffers;
-    struct list_head write_buffers;
-    size_t mem_count;
-};
-
 static LIST_HEAD(sockets);
-
-static void release_buffer(smpsocket s, buffer *b)
-{
-    int blocked = s->mem_count >= SOCKET_DEFAULT_MAX_MEM;
-    s->mem_count -= b->size;
-    if(blocked && s->mem_count < SOCKET_DEFAULT_MAX_MEM)
-        event_modify(s->event, EV_ADD | EV_READ);
-    list_del(&b->list);
-    buffer_recycle(b);
-}
 
 static int read_callback(event e, struct event_info *info)
 {
     DPRINTF("read_callback\n");
-    smpsocket s = (smpsocket)info->context;
-    buffer *b = NULL;
+    Socket this = (Socket)info->context;
+    CALL((StringIO)this->__read_buffers, seek, 0, SEEK_END);
+    buffer *b = CALL(this->__read_buffers, get_current_buffer);
+    char new_buffer = 0;
     /* check to see if our current buffer has space left */
-    if(!list_empty(&s->read_buffers))
-    {
-        b = list_tail(buffer, &s->read_buffers, list);
-        if(b->used == b->size)
-        {
-            b = NULL;
-        }
-    }
     if(b == NULL)
     {
         b = buffer_get(SOCKET_BUFFER_SIZE);
         if(b == NULL)
         {
             DPRINTF("buffer_get gave us a NULL buffer\n");
-            socket_free(s);
+            DELETE(this);
             return EV_DONE;
         }
-        s->mem_count += b->size;
-        list_add(&b->list, &s->read_buffers);
-
-        if(s->mem_count >= SOCKET_DEFAULT_MAX_MEM)
-        {
-            event_modify(e, EV_REMOVE | EV_READ);
-        }
+        new_buffer = 1;
     }
 
-    int read_count = recv(info->fd, b->ptr + b->used, b->size - b->used, MSG_DONTWAIT);
+    int read_count = recv(
+        info->fd, 
+        (void*)((uintptr_t)b->ptr + b->pos),
+        b->size - b->pos, MSG_DONTWAIT);
+
     DPRINTF("recv() returned: %d\n", read_count);
+
     if(read_count == -1)
     {
-        if(b->used == 0)
+        if(new_buffer)
         {
-            release_buffer(s, b);
+            buffer_recycle(b);
+            b = NULL;
         }
         if(errno == EAGAIN || errno == EWOULDBLOCK)
             return EV_DONE;
@@ -85,61 +57,73 @@ static int read_callback(event e, struct event_info *info)
             return EV_READ_PENDING;
         /* TODO: error handling? */
         DPRINTF("Error while reading: %s (%d)\n", strerror(errno), errno);
-        socket_free(s);
+        DELETE(this);
         return EV_DONE;
     }
     if(read_count == 0)
     {
-        if(b->used == 0)
+        if(new_buffer)
         {
-            release_buffer(s, b);
+            buffer_recycle(b);
+            b = NULL;
         }
         /* EOF */
         DPRINTF("EOF RECEIVED\n");
-        s->eof = 1;
-        if(s->write_closed)
-            socket_free(s);
+        this->flag_eof = 1;
+        if(this->write_closed)
+            DELETE(this);
         else
             event_modify(e, EV_REMOVE | EV_READ);
+        return EV_DONE;
     }
-    b->used += read_count;
+    if(new_buffer)
+    {
+        b->used += read_count;
+        CALL((StringIO)this->read_queue, write_buffer, b);
+    }
+    else
+        CALL(this->__read_buffers, update_current_buffer, read_count);
 
-    s->info.data_available(s, &s->info);
-
+    this->info.data_available(this);
     return EV_READ_PENDING;
 }
 
 static int write_callback(event e, struct event_info *info)
 {
     DPRINTF("write_callback\n");
-    smpsocket s = (smpsocket)info->context;
-    buffer *b = NULL;
+    Socket this = (Socket)info->context;
+    CALL((StringIO)this->__write_buffers, seek, 0, SEEK_SET);
+    buffer *b = CALL(this->__write_buffers, get_current_buffer);
 
-    if(list_empty(&s->write_buffers))
+    if(b == NULL)
     {
         event_modify(e, EV_REMOVE | EV_WRITE);
-        if(s->write_closed)
+        if(this->write_closed)
         {
             DPRINTF("SENDING EOF\n");
             int result = shutdown(info->fd, SHUT_WR);
             if(result == -1 && errno != ENOTCONN)
                 DPRINTF("Error sending EOF: %s (%d)\n", strerror(errno), errno);
-            if(s->eof)
-                socket_free(s);
+            if(this->flag_eof)
+                DELETE(this);
         }
-        DPRINTF("List Empty!\n");
+        DPRINTF("write queue is empty\n");
         return EV_DONE;    
     }
 
-    b = list_first(buffer, &s->write_buffers, list);
-
     int write_size = b->used - b->pos;
+    ASSERT(write_size > 0);
     if(write_size == 0)
     {
-        release_buffer(s, b);
-        return EV_WRITE_PENDING;
+        DELETE(this);
+        return EV_DONE;
     }
-    int result = send(info->fd, (void*)((uintptr_t)b->ptr + b->pos), b->used - b->pos, MSG_DONTWAIT | MSG_NOSIGNAL);
+    int result = send(
+            info->fd, 
+            (void*)((uintptr_t)b->ptr + b->pos), 
+            b->used - b->pos, 
+            MSG_DONTWAIT | MSG_NOSIGNAL);
+
     if(result == -1)
     {
         if(errno == EAGAIN || errno == EWOULDBLOCK)
@@ -148,10 +132,12 @@ static int write_callback(event e, struct event_info *info)
             return EV_WRITE_PENDING;
         /* TODO: error handling */
         DPRINTF("Received error on send: %s (%d)\n", strerror(errno), errno);
-        socket_free(s);
+        DELETE(this);
         return EV_DONE;
     }
-    b->pos += result;
+    /* remove written data from start of stringio */
+    CALL((StringIO)this->__write_buffers, rtruncate,
+        this->__write_buffers->total_size - result);
     return EV_WRITE_PENDING;
 }
 
@@ -161,186 +147,161 @@ static int except_callback(event e, struct event_info *info)
     return EV_DONE;
 }
 
-smpsocket socket_new(struct socket_info *info)
+#define CLASS_NAME(a,b) a## Socket ##b
+Socket METHOD_IMPL(construct, struct socket_info *info)
 {
-    smpsocket sock = (smpsocket)malloc(sizeof(struct socket));
+    SUPER_CALL(Object, this, construct);
+    this->__read_buffers = NEW(MemStringIO);
+    this->__write_buffers = NEW(MemStringIO);
+    this->read_queue = NEW(Pipe, this->__read_buffers);
+    this->write_queue = NEW(Pipe, this->__write_buffers);
 
-    sock->info = *info;
-    sock->eof = 0;
-    sock->write_closed = 0;
-    sock->mem_count = 0;
-    INIT_LIST_HEAD(&sock->read_buffers);
-    INIT_LIST_HEAD(&sock->write_buffers);
+    this->info = *info;
 
     struct event_info event_info = {
         .fd = info->sock_fd,
         .events = EV_READ | EV_EXCEPT,
-        .context = sock,
+        .context = this,
         .read = read_callback,
         .write = write_callback,
         .except = except_callback,
     };
 
-    int result = event_register(&event_info, &sock->event);
+    int result = event_register(&event_info, &this->event);
     if(result != EVENTMGR_SUCCESS)
     {
-        DPRINTF("Failed to register event: %s (%d)\n", eventmanager_strerror(result), result);
-        free(sock);
+        DPRINTF("Failed to register event: %s (%d)\n",
+            eventmanager_strerror(result), result);
+        free(this);
         return NULL;
     }
-    list_add(&sock->list, &sockets);
-    return sock;
+    list_add(&this->list, &sockets);
+    return this;
 }
 
-size_t socket_read(smpsocket s, void *buff, size_t size)
+size_t METHOD_IMPL(read, void *buf, size_t size)
 {
-    buffer *b;
-    while(1)
-    {
-        if(list_empty(&s->read_buffers))
-        {
-            if(s->eof)
-                return 0;
-            errno = EAGAIN;
-            return -1;
-        }
-        b = list_first(buffer, &s->read_buffers, list);
-        if(b->pos < b->used)
-            break;
-        release_buffer(s, b);
-    }
-    size_t avail = b->used - b->pos;
-    if(avail > size)
-        avail = size;
-    memcpy(buff, (void*)((uintptr_t)b->ptr + b->pos), avail);
-    b->pos += avail;
-    return avail;
+    return CALL((StringIO)this->read_queue, read, buf, size);
 }
 
-buffer *socket_read_buffer(smpsocket s)
+buffer *METHOD_IMPL(read_buffer)
 {
-    if(list_empty(&s->read_buffers))
-        return NULL;
-    buffer *b = list_first(buffer, &s->read_buffers, list);
-    s->mem_count -= b->size;
-    list_del(&b->list);
-    return b;
+    return CALL((StringIO)this->read_queue, read_buffer);
 }
 
-char socket_eof(smpsocket s)
+char METHOD_IMPL(eof)
 {
-    if(list_empty(&s->read_buffers))
-        return s->eof;
+    if(CALL((StringIO)this->__read_buffers, seek, 0, SEEK_END) == 0)
+        return this->flag_eof;
     return 0;
 }
 
 /* unless there is an error, we will always eat the entire buffer */
 /* errors are probably fatal TODO figure this out later */
-int socket_write(smpsocket s, void *buff, size_t size)
+int METHOD_IMPL(write, void *buff, size_t size)
 {
-    if(s->write_closed)
-        return -1;
-    buffer *b = NULL;
-    size_t avail;
-    if(!list_empty(&s->write_buffers))
-        b = list_tail(buffer, &s->write_buffers, list);
-    while(1)
+    if(this->write_closed)
     {
-        if(b == NULL)
-        {
-            b = buffer_get(size > SOCKET_BUFFER_SIZE?size:SOCKET_BUFFER_SIZE);
-            if(b == NULL)
-            {
-                DPRINTF("Received NULL buffer!\n");
-                return -1;
-            }
-            s->mem_count += b->size;
-            list_add_tail(&b->list, &s->write_buffers);
-        }
-        avail = b->size - b->used;
-        if(avail > size)
-            avail = size;
-        memcpy((void*)((uintptr_t)b->ptr + b->used), buff, avail);
-
-        size -= avail;
-
-        if(size == 0)
-            break;
-
-        buff = (void*)((uintptr_t)buff+avail);
-        b = NULL;
+        errno = EPIPE;
+        return -1;
     }
-    event_modify(s->event, EV_ADD | EV_WRITE);
+    size_t len = CALL((StringIO)this->write_queue, write, buff, size);
+    if(len < 0)
+        return -1;
+    event_modify(this->event, EV_ADD | EV_WRITE);
     return 0;
 }
 
-int socket_write_buffer(smpsocket s, buffer *b)
+int METHOD_IMPL(write_buffer, buffer *b)
 {
-    if(s->write_closed)
+    if(this->write_closed)
+    {
+        errno = EPIPE;
         return -1;
-    s->mem_count += b->size;
-    list_add_tail(&b->list, &s->write_buffers);
-    event_modify(s->event, EV_ADD | EV_WRITE);
+    }
+    CALL((StringIO)this->write_queue, write_buffer, b);
+    event_modify(this->event, EV_ADD | EV_WRITE);
     return 0;
 }
 
 /* shutdown WR */
-void socket_send_eof(smpsocket s)
+void METHOD_IMPL(send_eof)
 {
-    s->write_closed = 1;
-    event_modify(s->event, EV_ADD | EV_WRITE);
+    this->write_closed = 1;
+    event_modify(this->event, EV_ADD | EV_WRITE);
+}
+
+off_t METHOD_IMPL(seek, off_t offset, int whence)
+{
+    errno = ESPIPE;
+    return -1;
+}
+
+int METHOD_IMPL(truncate, size_t len)
+{
+    errno = EINVAL;
+    return -1;
+}
+
+int METHOD_IMPL(rtruncate, size_t len)
+{
+    errno = EINVAL;
+    return -1;
 }
 
 /* frees this socket with no regard to waiting data */
-void socket_free(smpsocket s)
+void METHOD_IMPL(deconstruct)
 {
-    event_deregister(s->event);
-    s->event = NULL;
+    event_deregister(this->event);
+    this->event = NULL;
 
-#ifdef __DEBUG__
-    int count = 0;
-#endif
-    buffer *i, *j;
-    list_for_each_entry_safe(i, j, &s->read_buffers, list)
-    {
-#ifdef __DEBUG__
-        count++;
-#endif
-        list_del(&i->list);
-        buffer_recycle(i);
-    }
-#ifdef __DEBUG__
-    DPRINTF("Freed %d buffers in socket read list\n", count);
-    count = 0;
-#endif
-    list_for_each_entry_safe(i, j, &s->write_buffers, list)
-    {
-#ifdef __DEBUG__
-        count++;
-#endif
-        list_del(&i->list);
-        buffer_recycle(i);
-    }
-#ifdef __DEBUG__
-    DPRINTF("Freed %d buffers in socket write list\n", count);
-#endif
+    DELETE(this->__read_buffers);
+    DELETE(this->__write_buffers);
+    DELETE(this->read_queue);
+    DELETE(this->write_queue);
 
-    int result = shutdown(s->info.sock_fd, SHUT_RDWR);
+    int result = shutdown(this->info.sock_fd, SHUT_RDWR);
     if(result == -1)
     {
         DPRINTF("Error shutting down socket: %s (%d)\n", strerror(errno), errno);
     }
-    close(s->info.sock_fd);
+    close(this->info.sock_fd);
 
-    s->info.on_free(s, &s->info);
+    this->info.on_free(this);
 
-    list_del(&s->list);
-    free(s);
+    list_del(&this->list);
 }
+
+VIRTUAL(StringIO)
+    VMETHOD_BASE(Object, construct);
+    VMETHOD_BASE(Object, deconstruct);
+
+    VMETHOD_BASE(StringIO, read);
+    VMETHOD_BASE(StringIO, write);
+    VMETHOD_BASE(StringIO, read_buffer);
+    VMETHOD_BASE(StringIO, write_buffer);
+    VMETHOD_BASE(StringIO, seek);
+    VMETHOD_BASE(StringIO, truncate);
+    VMETHOD_BASE(StringIO, rtruncate);
+
+    VMETHOD(eof);
+    VMETHOD(send_eof);
+
+    VFIELD(__read_buffers) = NULL;
+    VFIELD(__write_buffers) = NULL;
+    VFIELD(read_queue) = NULL;
+    VFIELD(write_queue) = NULL;
+
+    VFIELD(event) = NULL;
+
+    VFIELD(flag_eof) = 0;
+    VFIELD(write_closed) = 0;
+END_VIRTUAL
+#undef CLASS_NAME
 
 void socket_free_all()
 {
-    smpsocket i, j;
+    Socket i, j;
 #ifdef __DEBUG__
     int count = 0;
 #endif
@@ -349,7 +310,7 @@ void socket_free_all()
 #ifdef __DEBUG__
         count++;
 #endif
-        socket_free(i);
+        DELETE(i);
     }
     DPRINTF("Freed %d sockets\n", count);
 }

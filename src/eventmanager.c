@@ -208,7 +208,6 @@ int eventmanager_tick(int milliseconds)
             32,
             milliseconds);
 
-    DPRINTF("ready_count: %d\n", ready_count);
     if(ready_count == -1)
     {
         return EVENTMGR_EPOLL_WAIT_FAILED;

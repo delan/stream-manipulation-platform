@@ -9,28 +9,39 @@
 #include <signal.h>
 #include <stdlib.h>
 
+#include "class.h"
+
 #include "pluginloader.h"
 #include "eventmanager.h"
 #include "sockets.h"
 #include "buffermanager.h"
+#include "http_parser.h"
 
 #include "debug.h"
 
-static void data_available(smpsocket s, struct socket_info *info)
+static void data_available(Socket s)
 {
     DPRINTF("data available!\n");
-    buffer *b;
-    while((b = socket_read_buffer(s)))
+
+    struct socket_info *info = &s->info;
+    http h = (http)info->context;
+    if(!h)
     {
-        DPRINTF("writing buffer\n");
-        socket_write_buffer(s, b);
+        h = http_new(&buffer_recycle);
+        info->context = h;
+    }
+    buffer *b;
+    while( (b = CALL((StringIO)s, read_buffer)) )
+    {
+    //    http_feed_data(h, b);
+        CALL((StringIO)s, write_buffer, b);
     }
 
-    if(socket_eof(s))
-        socket_send_eof(s);
+    if(CALL(s, eof))
+        CALL(s, send_eof);
 }
 
-static void on_free(smpsocket s, struct socket_info *info)
+static void on_free(Socket s)
 {
     DPRINTF("socket is being freed!\n");
 }
@@ -63,7 +74,7 @@ static int accept_callback(event e, struct event_info *info)
         .on_free = on_free,
     };
 
-    socket_new(&sock_info);
+    NEW(Socket, &sock_info);
     return EV_READ_PENDING;
 }
 
@@ -122,7 +133,7 @@ int main(int argc, char *argv[])
     while(!quit)
     {
         eventmanager_tick(1000);
-        buffer_garbage_collect(60);
+        buffer_garbage_collect(1);
     }
 
     event_deregister(e);
