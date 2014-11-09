@@ -24,8 +24,8 @@ CLASS(StringIO)
     
     /* write pos */
     buffer *current_buf;
-    off_t current_pos;
 
+    off_t current_pos;
     size_t total_size;
 
     size_t new_buffer_size;

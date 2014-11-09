@@ -23,22 +23,17 @@ static void data_available(Socket s)
 {
     DPRINTF("data available!\n");
 
-    struct socket_info *info = &s->info;
-    http h = (http)info->context;
-    if(!h)
-    {
-        h = http_new(&buffer_recycle);
-        info->context = h;
-    }
     buffer *b;
     while( (b = CALL((StringIO)s, read_buffer)) )
     {
-    //    http_feed_data(h, b);
         CALL((StringIO)s, write_buffer, b);
     }
 
     if(CALL(s, eof))
+    {
+        DPRINTF("calling 'send_eof'\n");
         CALL(s, send_eof);
+    }
 }
 
 static void on_free(Socket s)

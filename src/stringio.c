@@ -50,7 +50,8 @@ static size_t METHOD_IMPL(read, void *buf, size_t len)
     size_t read_count = 0;
     while(len > 0)
     {
-        if(!this->current_buf || this->current_buf->pos == this->current_buf->used)
+        if(!this->current_buf || 
+            this->current_buf->pos == this->current_buf->used)
         {
             /* check if we are the last buffer */
             if(this->current_buf->list.next == &this->buffers)
@@ -141,8 +142,7 @@ static buffer *METHOD_IMPL(read_buffer)
         else
             this->current_buf =
                 list_entry(&ret->list.next, buffer, list);
-        ret->ref_count++;
-        return ret;
+        return buffer_dup(ret);
     }
     errno = EAGAIN;
     return NULL;
@@ -159,6 +159,7 @@ static int METHOD_IMPL(write_buffer, buffer *b)
         this->total_size = b->used;
         this->current_pos = b->used;
         this->current_buf = b;
+        b->pos = b->used;
         return 0;
     }
     else if(w->pos == 0)
@@ -189,6 +190,7 @@ static int METHOD_IMPL(write_buffer, buffer *b)
             
             len -= w->used - w->pos;
             w->used = w->pos;
+            ASSERT(w->used <= w->size);
         }
         if(b->list.next == &this->buffers)
             w = NULL;
@@ -318,6 +320,7 @@ static int METHOD_IMPL(truncate, off_t size)
             if(extension < len)
                 len = extension;
             b->used = len;
+            ASSERT(b->used <= b->size);
             extension -= len;
         }
         /* add more buffers until we get there */
@@ -334,7 +337,10 @@ static int METHOD_IMPL(truncate, off_t size)
             if(extension > b->size)
                 b->used = b->size;
             else
+            {
                 b->used = extension;
+                ASSERT(b->used <= b->size);
+            }
 
             /* calculate this as we go in case we fail with ENOMEM */
             this->total_size += b->used;
@@ -409,7 +415,10 @@ static int METHOD_IMPL(rtruncate, off_t len)
             if(extension > b->size)
                 b->used = b->size;
             else
+            {
                 b->used = extension;
+                ASSERT(b->used <= b->size);
+            }
 
             /* calculate this as we go in case we fail with ENOMEM */
             this->total_size += b->used;
@@ -455,7 +464,10 @@ void METHOD_IMPL(update_current_buffer, size_t len)
 
     size_t remove_count = w->pos - w->used;
     if(w->used < w->pos)
+    {
         w->used = w->pos;
+        ASSERT(w->used <= w->size);
+    }
 
     buffer *pending_free = NULL;
     while(remove_count > 0)
@@ -511,7 +523,7 @@ VIRTUAL(StringIO)
     VFIELD(total_size) = 0;
     VFIELD(new_buffer_size) = 4096;
 END_VIRTUAL
-#undef CLASS_NAME
+#undef CLASS_NAME // MemStringIO
 
 #define CLASS_NAME(a,b) a## Pipe ##b
 static Pipe METHOD_IMPL(construct, StringIO base)

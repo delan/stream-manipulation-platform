@@ -13,7 +13,7 @@
 #include "buffermanager.h"
 
 #define SOCKET_BUFFER_SIZE      (128*1024) // 128KiB
-#define SOCKET_DEFAULT_MAX_MEM  (1024*1024)
+#define SOCKET_DEFAULT_MAX_MEM  (1024)
 
 static LIST_HEAD(sockets);
 
@@ -35,8 +35,12 @@ static int read_callback(event e, struct event_info *info)
             return EV_DONE;
         }
         new_buffer = 1;
+        DPRINTF("received new buffer\n");
     }
 
+    DPRINTF("ptr: %p; pos: %lu\n", b->ptr, b->pos);
+    DPRINTF("used: %lu; size: %lu\n", b->used, b->size);
+    DPRINTF("orig_size: %lu\n", b->orig->const_size);
     int read_count = recv(
         info->fd, 
         (void*)((uintptr_t)b->ptr + b->pos),
@@ -73,12 +77,16 @@ static int read_callback(event e, struct event_info *info)
         if(this->write_closed)
             DELETE(this);
         else
+        {
+            this->info.data_available(this);
             event_modify(e, EV_REMOVE | EV_READ);
+        }
         return EV_DONE;
     }
     if(new_buffer)
     {
         b->used += read_count;
+        ASSERT(b->used <= b->size);
         CALL((StringIO)this->read_queue, write_buffer, b);
     }
     else
@@ -118,6 +126,16 @@ static int write_callback(event e, struct event_info *info)
         DELETE(this);
         return EV_DONE;
     }
+
+    DPRINTF("send(%d, %p, %lu, %d)\n",
+            info->fd, 
+            (void*)((uintptr_t)b->ptr + b->pos), 
+            b->used - b->pos, 
+            MSG_DONTWAIT | MSG_NOSIGNAL);
+    DPRINTF("ptr: %p; pos: %lu\n", b->ptr, b->pos);
+    DPRINTF("used: %lu; size: %lu\n", b->used, b->size);
+    DPRINTF("orig_size: %lu\n", b->orig->const_size);
+        
     int result = send(
             info->fd, 
             (void*)((uintptr_t)b->ptr + b->pos), 

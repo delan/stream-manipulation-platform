@@ -13,25 +13,17 @@
 
 #define MAX_HEADERS         128
 
-struct http
+struct search_state
 {
-    recycle_func recycler;
-    struct list_head buffers;
-    int state;
-    char **headers[128];
-    int header_count;
+    char needle[128];
+    int pos;
 };
 
-http http_new(recycle_func recycler)
+#define CLASS_NAME(a,b) a## Http ##b
+Http METHOD_IMPL(construct)
 {
-    http h = (http)malloc(sizeof(struct http));
-
-    h->recycler = recycler;
-    INIT_LIST_HEAD(&h->buffers);
-    h->state = STATE_HEADERS;
-    h->header_count = 0;
-
-    return h;
+    SUPER_CALL(Object, this, construct);
+    this->buffer = (StringIO)NEW(MemStringIO);
 }
 
 /* basically strtok's the string, but doesn't modify it */
@@ -83,11 +75,21 @@ static char **parse_header_string(char *c, unsigned int len)
     return hdrs;
 }
 
+static void METHOD_IMPL(read_headers, buffer *b)
+{
+    CALL(this->buffer, write_buffer, b);
+    struct search_state *state = this->search;
+    if(!state)
+    {
+        state = (struct search_state*)malloc(
+            sizeof(struct search_state));
+        strcpy(state->needle, "\r\n");
+        state->pos = 0;
+    }
+}
+
 static void read_headers(http http, buffer *b)
 {
-    char *pos = (char*)buffer_get_at_pos(b);
-    char *end = (char*)buffer_get_at_end(b);
-
     char *line_start = pos;
     for(;pos != end;pos++,b->pos++)
     {

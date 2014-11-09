@@ -15,4 +15,4 @@ add_definitions( -D__DEBUG__ )
 add_subdirectory("src")
 add_executable(testing test.c)
 
-target_link_libraries(testing sockets stringio eventmanager buffermanager pluginloader http class util)
+target_link_libraries(testing sockets stringio eventmanager buffermanager pluginloader class util)
