@@ -39,7 +39,8 @@ struct CLASS_NAME(,) {                   \
 
 #define DELETE(obj)    \
     (((Object)obj)->deconstruct((Object)obj), \
-    free(obj))
+    free(obj),  \
+    obj = NULL)
 
 #define METHOD_IMPL(name, ...)  \
     CLASS_NAME(,_ ## name)(CLASS_NAME(,) this, ## __VA_ARGS__)

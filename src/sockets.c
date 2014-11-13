@@ -12,14 +12,13 @@
 #include "eventmanager.h"
 #include "buffermanager.h"
 
-#define SOCKET_BUFFER_SIZE      (128*1024) // 128KiB
-#define SOCKET_DEFAULT_MAX_MEM  (1024)
+#define SOCKET_BUFFER_SIZE      (4*1024) // 128KiB
+#define SOCKET_DEFAULT_MAX_MEM  (1024*1024)
 
 static LIST_HEAD(sockets);
 
 static int read_callback(event e, struct event_info *info)
 {
-    DPRINTF("read_callback\n");
     Socket this = (Socket)info->context;
     CALL((StringIO)this->__read_buffers, seek, 0, SEEK_END);
     buffer *b = CALL(this->__read_buffers, get_current_buffer);
@@ -35,18 +34,12 @@ static int read_callback(event e, struct event_info *info)
             return EV_DONE;
         }
         new_buffer = 1;
-        DPRINTF("received new buffer\n");
     }
 
-    DPRINTF("ptr: %p; pos: %lu\n", b->ptr, b->pos);
-    DPRINTF("used: %lu; size: %lu\n", b->used, b->size);
-    DPRINTF("orig_size: %lu\n", b->orig->const_size);
     int read_count = recv(
         info->fd, 
         (void*)((uintptr_t)b->ptr + b->pos),
         b->size - b->pos, MSG_DONTWAIT);
-
-    DPRINTF("recv() returned: %d\n", read_count);
 
     if(read_count == -1)
     {
@@ -92,13 +85,16 @@ static int read_callback(event e, struct event_info *info)
     else
         CALL(this->__read_buffers, update_current_buffer, read_count);
 
-    this->info.data_available(this);
+    /* actually give the buffer a chance to fill up */
+    if(b->used >= b->size)
+        this->info.data_available(this);
+    else
+        event_alarm(e, 100);
     return EV_READ_PENDING;
 }
 
 static int write_callback(event e, struct event_info *info)
 {
-    DPRINTF("write_callback\n");
     Socket this = (Socket)info->context;
     CALL((StringIO)this->__write_buffers, seek, 0, SEEK_SET);
     buffer *b = CALL(this->__write_buffers, get_current_buffer);
@@ -115,7 +111,6 @@ static int write_callback(event e, struct event_info *info)
             if(this->flag_eof)
                 DELETE(this);
         }
-        DPRINTF("write queue is empty\n");
         return EV_DONE;    
     }
 
@@ -127,15 +122,6 @@ static int write_callback(event e, struct event_info *info)
         return EV_DONE;
     }
 
-    DPRINTF("send(%d, %p, %lu, %d)\n",
-            info->fd, 
-            (void*)((uintptr_t)b->ptr + b->pos), 
-            b->used - b->pos, 
-            MSG_DONTWAIT | MSG_NOSIGNAL);
-    DPRINTF("ptr: %p; pos: %lu\n", b->ptr, b->pos);
-    DPRINTF("used: %lu; size: %lu\n", b->used, b->size);
-    DPRINTF("orig_size: %lu\n", b->orig->const_size);
-        
     int result = send(
             info->fd, 
             (void*)((uintptr_t)b->ptr + b->pos), 
@@ -165,6 +151,13 @@ static int except_callback(event e, struct event_info *info)
     return EV_DONE;
 }
 
+static int alarm_callback(event e, struct event_info *info)
+{
+    Socket this = (Socket)info->context;
+    this->info.data_available(this);
+    return EV_DONE;
+}
+
 #define CLASS_NAME(a,b) a## Socket ##b
 Socket METHOD_IMPL(construct, struct socket_info *info)
 {
@@ -183,6 +176,7 @@ Socket METHOD_IMPL(construct, struct socket_info *info)
         .read = read_callback,
         .write = write_callback,
         .except = except_callback,
+        .alarm = alarm_callback,
     };
 
     int result = event_register(&event_info, &this->event);

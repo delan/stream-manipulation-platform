@@ -24,6 +24,7 @@ static buffer *get_meta()
     else
     {
         buffer *b = list_first(buffer, &avail_meta, list);
+        ASSERT((void*)b != (void*)&avail_meta)
         list_del(&b->list);
         return b;
     }
@@ -37,7 +38,7 @@ buffer *buffer_get(size_t min_size)
         if(min_size <= i->const_size)
         {
             i->ref_count = 1;
-            list_del_init(&i->list);
+            list_del(&i->list);
             return &i->b;
         }
     }
@@ -59,7 +60,7 @@ buffer *buffer_get(size_t min_size)
     i->const_size = b->size = buffer_size;
     i->free_buf = 0; // buf is part of this allocation
     i->ref_count = 1;
-    INIT_LIST_HEAD(&i->list);
+    i->list.next = i->list.prev = NULL;
 
     b->pos = 0;
     b->used = 0;
@@ -90,11 +91,13 @@ buffer *buffer_dup(buffer *b)
     buffer *dup = get_meta();
     memcpy(dup, b, sizeof(buffer));
     b->orig->ref_count++;
+    dup->list.next = dup->list.prev = NULL;
     return dup;
 }
 
 void buffer_recycle(buffer *buf)
 {
+    ASSERT(buf->list.next == NULL && buf->list.prev == NULL);
     struct buffer_const *b = buf->orig;
     buf->ptr = b->const_ptr;
     buf->pos = 0;
@@ -141,6 +144,15 @@ void buffer_garbage_collect(int age)
         }
         else if(age)
             break;
+    }
+    if(!age)
+    {
+        buffer *i, *j;
+        list_for_each_entry_safe(i, j, &avail_meta, list)
+        {
+            list_del(&i->list);
+            free(i);
+        }
     }
 #ifdef __DEBUG__
     if(count > 0)

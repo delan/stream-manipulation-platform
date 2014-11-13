@@ -40,6 +40,7 @@ struct event_info
     int (*read)(event e, struct event_info*);
     int (*write)(event e,struct event_info*);
     int (*except)(event e, struct event_info*);
+    int (*alarm)(event e, struct event_info*);
 };
 
 const char *eventmanager_strerror(int err);
@@ -47,6 +48,7 @@ const char *eventmanager_strerror(int err);
 int eventmanager_init(void);
 int event_register(struct event_info *event_info, struct event **event);
 int event_modify(struct event *event, int events);
+int event_alarm(struct event *event, int milliseconds);
 int event_deregister(struct event *event);
 int eventmanager_tick(int milliseconds);
 void eventmanager_cleanup(void);

@@ -18,7 +18,7 @@ static buffer *METHOD_IMPL(get_buffer_at_pos, off_t *pos)
     buffer *b;
     list_for_each_entry(b, &this->buffers, list)
     {
-        if(*pos < b->used)
+        if(*pos <= b->used)
             return b;
         *pos -= b->used;
     }
@@ -58,7 +58,7 @@ static size_t METHOD_IMPL(read, void *buf, size_t len)
                 break;
             /* otherwise, go to next buffer */
             b = this->current_buf =
-                list_entry(&this->current_buf->list, buffer, list);
+                list_entry(this->current_buf->list.next, buffer, list);
         }
         else
             b = this->current_buf;
@@ -74,6 +74,7 @@ static size_t METHOD_IMPL(read, void *buf, size_t len)
         len -= avail;
         b->pos += avail;
         *(uintptr_t*)&buf += avail;
+        read_count = avail;
     }
 
     if(read_count == 0)
@@ -138,7 +139,9 @@ static buffer *METHOD_IMPL(read_buffer)
         this->current_pos +=
             (ret->used - ret->pos);
         if(ret->list.next == &this->buffers)
+        {
             this->current_buf = NULL;
+        }
         else
             this->current_buf =
                 list_entry(&ret->list.next, buffer, list);
@@ -150,15 +153,16 @@ static buffer *METHOD_IMPL(read_buffer)
 
 static int METHOD_IMPL(write_buffer, buffer *b)
 {
+    if(b == NULL)
+        return 0;
     buffer *w = this->current_buf;
     size_t len = b->used;
 
     if(!w)
     {
-        list_add(&b->list, &this->buffers);
-        this->total_size = b->used;
-        this->current_pos = b->used;
-        this->current_buf = b;
+        list_add_tail(&b->list, &this->buffers);
+        this->total_size += b->used;
+        this->current_pos += b->used;
         b->pos = b->used;
         return 0;
     }
@@ -208,7 +212,7 @@ static int METHOD_IMPL(write_buffer, buffer *b)
             if(w->list.next == &this->buffers)
                 break;
             buffer *b = w;
-            w = list_entry(&w->list.next, buffer, list);
+            w = list_entry(w->list.next, buffer, list);
             list_del(&b->list);
             buffer_recycle(b);
             b = NULL;
@@ -224,7 +228,7 @@ static int METHOD_IMPL(write_buffer, buffer *b)
     }
     this->current_buf = w;
 
-    size_t replaced_count = this->current_pos - b->used;
+    size_t replaced_count = this->total_size - this->current_pos;
     if(replaced_count < b->used)
         this->total_size += b->used - replaced_count;
     this->current_pos += b->used;
@@ -268,7 +272,8 @@ static off_t METHOD_IMPL(seek, off_t pos, int whence)
             this->current_buf = list_tail(buffer, &this->buffers, list);
             this->current_buf->pos =
                 this->current_buf->used;
-            return 0;
+            this->current_pos = pos;
+            return this->current_pos;
         }
         this->current_pos = pos;
         this->current_buf = PRIV_CALL(this, get_buffer_at_pos, &pos);
@@ -280,7 +285,7 @@ static off_t METHOD_IMPL(seek, off_t pos, int whence)
     return -1;
 }
 
-static int METHOD_IMPL(truncate, off_t size)
+static int METHOD_IMPL(truncate, size_t size)
 {
     if(size < this->total_size)
     {
@@ -353,14 +358,15 @@ static int METHOD_IMPL(truncate, off_t size)
 }
 
 /* reverse truncate - adds / removes from the start */
-static int METHOD_IMPL(rtruncate, off_t len)
+static int METHOD_IMPL(rtruncate, size_t len)
 {
+    /* catch probable negative values */
+    ASSERT((ssize_t)len >= 0);
     if(len == 0)
     {
         buffer *i, *j;
         list_for_each_entry_safe(i, j, &this->buffers, list)
         {
-            DPRINTF("%p\n", i);
             list_del(&i->list);
             buffer_recycle(i);
             i = NULL;
@@ -375,13 +381,13 @@ static int METHOD_IMPL(rtruncate, off_t len)
     {
         size_t remove = this->total_size - len;
         DPRINTF("removing %lu bytes from start of stringio\n", remove);
-        /* iterate backwards */
         buffer *b, *i;
 
         list_for_each_entry_safe(b, i, &this->buffers, list)
         {
             if(b->used <= remove)
             {
+                DPRINTF("removing buffer\n");
                 remove -= b->used;
                 list_del(&b->list);
                 buffer_recycle(b);
@@ -389,6 +395,7 @@ static int METHOD_IMPL(rtruncate, off_t len)
             }
             else
             {
+                DPRINTF("trimming start of buffer by %lu\n", remove);
                 b->used -= remove;
                 *(uintptr_t*)&b->ptr += remove;
                 b->size -= remove;
@@ -432,6 +439,7 @@ static int METHOD_IMPL(rtruncate, off_t len)
     if(this->current_pos < 0)
         this->current_pos = 0;
     off_t pos = this->current_pos;
+    DPRINTF("new pos: %lu\n", pos);
     this->current_buf = PRIV_CALL(this, get_buffer_at_pos, &pos);
     this->current_buf->pos = pos;
     return 0;

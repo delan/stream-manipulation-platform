@@ -1,11 +1,12 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <sys/epoll.h>
 
+#include "heap.h"
 #include "eventmanager.h"
-
 #include "debug.h"
 
 struct event
@@ -15,6 +16,7 @@ struct event
     struct list_head pending_read;
     struct list_head pending_write;
     struct event_info info;
+    struct tree_node alarm_tree;
 };
 
 static LIST_HEAD(events);
@@ -24,6 +26,8 @@ static LIST_HEAD(pending_write);
 static LIST_HEAD(pending_removal);
 
 static int epoll_fd = -1;
+
+static Heap alarm_heap = NULL;
 
 const char *error_strings[] =
 {
@@ -50,6 +54,7 @@ int eventmanager_init(void)
     {
         return EVENTMGR_EPOLL_CREATE_FAILED;
     }
+    alarm_heap = NEW(Heap);
     return EVENTMGR_SUCCESS;
 }
 
@@ -64,6 +69,7 @@ int event_register(struct event_info *event_info, struct event **event)
         return EVENTMGR_NOT_INITIALIZED;
 
     struct event *e = (struct event*)malloc(sizeof(struct event));
+    memset(e, '\0', sizeof(*e));
     e->info = *event_info;
     INIT_LIST_HEAD(&e->pending_read);
     INIT_LIST_HEAD(&e->pending_write);
@@ -80,12 +86,29 @@ int event_register(struct event_info *event_info, struct event **event)
     epoll_event.data.ptr = e;
     if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event_info->fd, &epoll_event) == -1)
     {
+        free(e);
         return EVENTMGR_EPOLL_ADD_FAILED;
     }
     *event = e;
     list_add(&e->list, &events);
 
     return EVENTMGR_SUCCESS;
+}
+
+int event_alarm(struct event *event, int milliseconds)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+
+    long long ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    ms += milliseconds;
+    if(event->alarm_tree.ctxt != NULL)
+    {
+        CALL((Heap)event->alarm_tree.ctxt, remove, &event->alarm_tree);
+    }
+    CALL(alarm_heap, put, &event->alarm_tree, ms);
+    DPRINTF("Setting alarm for %lldms\n", ms);
+    return 0;
 }
 
 int event_modify(struct event *event, int events)
@@ -200,6 +223,41 @@ int eventmanager_tick(int milliseconds)
     /* if something somewhere is pending, no sleep */
     if(pending)
         milliseconds = 0;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    long long ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    while(1)
+    {
+        struct tree_node *alarm = CALL(alarm_heap, peek);
+        if(alarm)
+        {
+            struct event *e =
+                list_entry(alarm, struct event, alarm_tree);
+            if(ms >= alarm->priority)
+            {
+                DPRINTF("alarm triggered: %lldms (%lld)\n", 
+                    alarm->priority,
+                    ms - alarm->priority);
+                CALL(alarm_heap, remove, alarm);
+                trigger_event(e, e->info.alarm);
+            }
+            else
+            {
+                long long offs = alarm->priority - ms;
+                if(milliseconds > offs)
+                {
+                    milliseconds = (int)offs;
+                    DPRINTF("truncating sleep time to %dms\n", milliseconds);
+                }
+                break;
+            }
+        }
+        else
+        {
+            break;
+        }
+    }
 
     struct epoll_event events[32];
     int ready_count = epoll_wait(

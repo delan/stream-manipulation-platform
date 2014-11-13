@@ -16,6 +16,9 @@ CLASS(Object)
     int state;
     char **headers[128];
     int header_count;
+
+    void METHOD(feed_data, buffer *b);
+    char ***METHOD(get_headers, int *header_count);
 END_CLASS
 #undef CLASS_NAME // Http
 

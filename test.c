@@ -21,12 +21,18 @@
 
 static void data_available(Socket s)
 {
-    DPRINTF("data available!\n");
+    Http http = (Http)s->info.context;
+    if(!http)
+    {
+        http = NEW(Http);
+        s->info.context = http;
+    }
 
     buffer *b;
     while( (b = CALL((StringIO)s, read_buffer)) )
     {
-        CALL((StringIO)s, write_buffer, b);
+        //CALL((StringIO)s, write_buffer, b);
+        CALL(http, feed_data, b);
     }
 
     if(CALL(s, eof))
@@ -39,6 +45,8 @@ static void data_available(Socket s)
 static void on_free(Socket s)
 {
     DPRINTF("socket is being freed!\n");
+    if(s->info.context)
+        DELETE(s->info.context);
 }
 
 static int accept_callback(event e, struct event_info *info)
