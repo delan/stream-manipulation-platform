@@ -380,14 +380,12 @@ static int METHOD_IMPL(rtruncate, size_t len)
     if(len < this->total_size)
     {
         size_t remove = this->total_size - len;
-        DPRINTF("removing %lu bytes from start of stringio\n", remove);
         buffer *b, *i;
 
         list_for_each_entry_safe(b, i, &this->buffers, list)
         {
             if(b->used <= remove)
             {
-                DPRINTF("removing buffer\n");
                 remove -= b->used;
                 list_del(&b->list);
                 buffer_recycle(b);
@@ -395,7 +393,6 @@ static int METHOD_IMPL(rtruncate, size_t len)
             }
             else
             {
-                DPRINTF("trimming start of buffer by %lu\n", remove);
                 b->used -= remove;
                 *(uintptr_t*)&b->ptr += remove;
                 b->size -= remove;
@@ -439,7 +436,6 @@ static int METHOD_IMPL(rtruncate, size_t len)
     if(this->current_pos < 0)
         this->current_pos = 0;
     off_t pos = this->current_pos;
-    DPRINTF("new pos: %lu\n", pos);
     this->current_buf = PRIV_CALL(this, get_buffer_at_pos, &pos);
     this->current_buf->pos = pos;
     return 0;

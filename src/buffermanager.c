@@ -43,8 +43,8 @@ buffer *buffer_get(size_t min_size)
         }
     }
 
-    /* round up to nearest 4KB */
-    size_t buffer_size = ((min_size-1) & (~0xFFF)) + 0x1000;
+    /* round up to nearest 256B */
+    size_t buffer_size = ((min_size-1) & (~0xFF)) + 0x100;
     i = (struct buffer_const*)malloc(
         sizeof(struct buffer_const) +
         buffer_size);
@@ -61,6 +61,7 @@ buffer *buffer_get(size_t min_size)
     i->free_buf = 0; // buf is part of this allocation
     i->ref_count = 1;
     i->list.next = i->list.prev = NULL;
+    b->list.next = b->list.prev = NULL;
 
     b->pos = 0;
     b->used = 0;
@@ -78,7 +79,8 @@ buffer *buffer_wrap(void *p, size_t len)
     i->const_size = b->size = len;
     i->free_buf = 1;
     i->ref_count = 1;
-    INIT_LIST_HEAD(&i->list);
+    i->list.next = i->list.prev = NULL;
+    b->list.next = b->list.prev = NULL;
 
     b->used = b->size;
     b->orig = i;
@@ -105,7 +107,6 @@ void buffer_recycle(buffer *buf)
     buf->used = 0;
     if(--buf->orig->ref_count == 0)
     {
-        DPRINTF("recycling buffer %p\n", buf->orig->const_ptr);
         b->last_used = time(NULL);
         list_add_tail(&buf->orig->list, &free_buffers);
     }

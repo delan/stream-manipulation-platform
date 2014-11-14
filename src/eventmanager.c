@@ -38,6 +38,7 @@ const char *error_strings[] =
     "EPOLL Del call failed",
     "EPOLL Wait call failed",
     "Eventmanager is not initialized",
+    "Error involving RTC (/dev/rtc)",
 };
 
 const char *eventmanager_strerror(int err)
@@ -54,7 +55,12 @@ int eventmanager_init(void)
     {
         return EVENTMGR_EPOLL_CREATE_FAILED;
     }
-    alarm_heap = NEW(Heap);
+
+    long long compare(long long a, long long b)
+    {
+        return a < b?-1:1;
+    }
+    alarm_heap = NEW(Heap, &compare);
     return EVENTMGR_SUCCESS;
 }
 
@@ -75,19 +81,22 @@ int event_register(struct event_info *event_info, struct event **event)
     INIT_LIST_HEAD(&e->pending_write);
     INIT_LIST_HEAD(&e->pending_removal);
 
-    struct epoll_event epoll_event;
-    epoll_event.events = EPOLLET;
-    if(event_info->events & EV_READ)
-        epoll_event.events |= EPOLLIN;
-    if(event_info->events & EV_WRITE)
-        epoll_event.events |= EPOLLOUT;
-    if(event_info->events & EV_EXCEPT)
-        epoll_event.events |= EPOLLERR;
-    epoll_event.data.ptr = e;
-    if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event_info->fd, &epoll_event) == -1)
+    if(event_info->fd != -1)
     {
-        free(e);
-        return EVENTMGR_EPOLL_ADD_FAILED;
+        struct epoll_event epoll_event;
+        epoll_event.events = EPOLLET;
+        if(event_info->events & EV_READ)
+            epoll_event.events |= EPOLLIN;
+        if(event_info->events & EV_WRITE)
+            epoll_event.events |= EPOLLOUT;
+        if(event_info->events & EV_EXCEPT)
+            epoll_event.events |= EPOLLERR;
+        epoll_event.data.ptr = e;
+        if(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, event_info->fd, &epoll_event) == -1)
+        {
+            free(e);
+            return EVENTMGR_EPOLL_ADD_FAILED;
+        }
     }
     *event = e;
     list_add(&e->list, &events);
@@ -107,7 +116,6 @@ int event_alarm(struct event *event, int milliseconds)
         CALL((Heap)event->alarm_tree.ctxt, remove, &event->alarm_tree);
     }
     CALL(alarm_heap, put, &event->alarm_tree, ms);
-    DPRINTF("Setting alarm for %lldms\n", ms);
     return 0;
 }
 
@@ -117,40 +125,41 @@ int event_modify(struct event *event, int events)
         return EVENTMGR_NOT_INITIALIZED;
 
     struct event_info *event_info = &event->info;
-
-    int action = events & EV_CTL_MASK;
-    events &= EV_MASK;
-
-    int orig_events = event_info->events;
-    if(action == EV_ADD)
-        event_info->events |= events;
-    else if(action == EV_REMOVE)
-        event_info->events &= ~events;
-    else if(action == EV_SET)
-        event_info->events = events;
-
-    /* guarantee 'write' gets called initially (epoll documentation is unclear on this) */
-    if(event_info->events & EV_WRITE && list_empty(&event->pending_write))
-        list_add_tail(&event->pending_write, &pending_write);
-
-    /* if there's no change, don't waste a syscall */
-    if(orig_events == event_info->events)
-        return EVENTMGR_SUCCESS;
-
-    DPRINTF("Modifying EPOLL\n");
-
-    struct epoll_event epoll_event;
-    epoll_event.events = EPOLLET;
-    if(event_info->events & EV_READ)
-        epoll_event.events |= EPOLLIN;
-    if(event_info->events & EV_WRITE)
-        epoll_event.events |= EPOLLOUT;
-    if(event_info->events & EV_EXCEPT)
-        epoll_event.events |= EPOLLERR;
-    epoll_event.data.ptr = event;
-    if(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, event_info->fd, &epoll_event) == -1)
+    if(event_info->fd != -1)
     {
-        return EVENTMGR_EPOLL_MOD_FAILED;
+        int action = events & EV_CTL_MASK;
+        events &= EV_MASK;
+
+        int orig_events = event_info->events;
+        if(action == EV_ADD)
+            event_info->events |= events;
+        else if(action == EV_REMOVE)
+            event_info->events &= ~events;
+        else if(action == EV_SET)
+            event_info->events = events;
+
+        /* guarantee 'write' gets called initially
+         * (epoll documentation is unclear on this) */
+        if(event_info->events & EV_WRITE && list_empty(&event->pending_write))
+            list_add_tail(&event->pending_write, &pending_write);
+
+        /* if there's no change, don't waste a syscall */
+        if(orig_events == event_info->events)
+            return EVENTMGR_SUCCESS;
+
+        struct epoll_event epoll_event;
+        epoll_event.events = EPOLLET;
+        if(event_info->events & EV_READ)
+            epoll_event.events |= EPOLLIN;
+        if(event_info->events & EV_WRITE)
+            epoll_event.events |= EPOLLOUT;
+        if(event_info->events & EV_EXCEPT)
+            epoll_event.events |= EPOLLERR;
+        epoll_event.data.ptr = event;
+        if(epoll_ctl(epoll_fd, EPOLL_CTL_MOD, event_info->fd, &epoll_event) == -1)
+        {
+            return EVENTMGR_EPOLL_MOD_FAILED;
+        }
     }
     return EVENTMGR_SUCCESS;
 }
@@ -162,20 +171,23 @@ int event_deregister(struct event *event)
 
     if(list_empty(&event->pending_removal))
         list_add_tail(&event->pending_removal, &pending_removal);
-    if(!epoll_ctl(epoll_fd, EPOLL_CTL_DEL, event->info.fd, NULL) == -1)
+    if(event->alarm_tree.ctxt != NULL)
+        CALL((Heap)event->alarm_tree.ctxt, remove, &event->alarm_tree);
+    if(event->info.fd != -1)
     {
-        return EVENTMGR_EPOLL_DEL_FAILED;
+        if(!epoll_ctl(epoll_fd, EPOLL_CTL_DEL, event->info.fd, NULL) == -1)
+        {
+            return EVENTMGR_EPOLL_DEL_FAILED;
+        }
     }
     return EVENTMGR_SUCCESS;
 }
 
 static int trigger_event(event e, int (*callback)(event e, struct event_info*))
 {
+    if(!callback)
+        return EV_DONE;
     int result = callback(e, &e->info);
-    if(result == EV_DONE)
-    {
-        DPRINTF("EV_DONE returned\n");
-    }
     if((result & EV_READ_PENDING))
     {
         if(list_empty(&e->pending_read))

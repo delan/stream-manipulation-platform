@@ -12,7 +12,7 @@
 #include "eventmanager.h"
 #include "buffermanager.h"
 
-#define SOCKET_BUFFER_SIZE      (4*1024) // 128KiB
+#define SOCKET_BUFFER_SIZE      (16*1024)
 #define SOCKET_DEFAULT_MAX_MEM  (1024*1024)
 
 static LIST_HEAD(sockets);
@@ -65,7 +65,6 @@ static int read_callback(event e, struct event_info *info)
             b = NULL;
         }
         /* EOF */
-        DPRINTF("EOF RECEIVED\n");
         this->flag_eof = 1;
         if(this->write_closed)
             DELETE(this);
@@ -104,7 +103,6 @@ static int write_callback(event e, struct event_info *info)
         event_modify(e, EV_REMOVE | EV_WRITE);
         if(this->write_closed)
         {
-            DPRINTF("SENDING EOF\n");
             int result = shutdown(info->fd, SHUT_WR);
             if(result == -1 && errno != ENOTCONN)
                 DPRINTF("Error sending EOF: %s (%d)\n", strerror(errno), errno);

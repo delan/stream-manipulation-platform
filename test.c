@@ -49,6 +49,7 @@ static void on_free(Socket s)
         DELETE(s->info.context);
 }
 
+int handle_count = 0;
 static int accept_callback(event e, struct event_info *info)
 {
     DPRINTF("accepting client\n");
@@ -77,6 +78,7 @@ static int accept_callback(event e, struct event_info *info)
         .on_free = on_free,
     };
 
+    handle_count++;
     NEW(Socket, &sock_info);
     return EV_READ_PENDING;
 }
@@ -112,7 +114,7 @@ int main(int argc, char *argv[])
         DPRINTF("bind() failed: %s (%d)\n", strerror(errno), errno);
         return 1;
     }
-    if(listen(sfd, 8) == -1)
+    if(listen(sfd, 32) == -1)
     {
         DPRINTF("listen() failed: %s (%d)\n", strerror(errno), errno);
     }
@@ -126,23 +128,39 @@ int main(int argc, char *argv[])
         .read = accept_callback,
         .write = NULL,
         .except = NULL,
+        .alarm = NULL,
     };
 
     event e;
     event_register(&info, &e);
+
+    int garbage_collect(event e, struct event_info *info)
+    {
+        buffer_garbage_collect(10);
+        event_alarm(e, 1000);
+        return EV_DONE;
+    }
+    info = (struct event_info){
+        .fd = -1,
+        .alarm = garbage_collect,
+    };
+    event gc;
+    event_register(&info, &gc);
+    event_alarm(gc, 1000);
 
     signal(SIGINT, sigint_handler);
 
     while(!quit)
     {
         eventmanager_tick(1000);
-        buffer_garbage_collect(1);
     }
 
     event_deregister(e);
     socket_free_all();
     buffer_garbage_collect(0);
     eventmanager_cleanup();
+
+    DPRINTF("total connections handled: %d\n", handle_count);
 
     return 0;
 }

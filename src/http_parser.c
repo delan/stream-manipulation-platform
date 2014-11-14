@@ -134,11 +134,12 @@ static void METHOD_IMPL(read_headers, buffer *b)
                 if(value)
                 {
                     for(;(*value == ' '  || *value == '\t') &&  
-                          *value != '\0'; value++) DPRINTF("%c\n", *value);
-                    DPRINTF("new headers: %s: %s\n", name, value);
+                          *value != '\0'; value++);
+    //                DPRINTF("new headers: %s: %s\n", name, value);
                 }
                 free(hdr_str);
                 state->pos = 0;
+                pos = -1;
             }
         }
         else
