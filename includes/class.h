@@ -175,7 +175,7 @@ void CLASS_NAME(__init_class_,)() {                                         \
 /* Calls a method that doesn't exist in the class declaration
  * (i.e, it's private) */
 #define PRIV_CALL(me, func, ...)                                            \
-    CLASS_NAME(,_ ## func)(me, ## __VA_ARGS__);
+    CLASS_NAME(,_ ## func)(me, ## __VA_ARGS__)
 /* Calls a method in an objects class */
 #define CALL(me, func, ...)                                                 \
     (me)->func(me, ## __VA_ARGS__)
