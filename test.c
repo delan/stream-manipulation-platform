@@ -25,6 +25,7 @@ static void data_available(Socket s)
     if(!http)
     {
         http = NEW(Http);
+        http->state = 1;
         s->info.context = http;
     }
 
@@ -33,6 +34,19 @@ static void data_available(Socket s)
     {
         //CALL((StringIO)s, write_buffer, b);
         CALL(http, feed_data, b);
+        char ***headers;
+        int header_count;
+        headers = CALL(http, get_headers, &header_count);
+        if(headers)
+        {
+            DPRINTF("Http headers: %d\n", header_count);
+            int i;
+            for(i = 0;i < header_count;i++)
+            {
+                DPRINTF("%s: %s\n", headers[i][0], headers[i][1]);
+            }
+            CALL(s, send_eof);
+        }
     }
 
     if(CALL(s, eof))

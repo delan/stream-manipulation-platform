@@ -8,9 +8,11 @@
 #include "http_parser.h"
 #include "buffermanager.h"
 
-#define STATE_HEADERS       0
-#define STATE_BODY          1
-#define STATE_EOF           2
+#define STATE_REQUEST       0
+#define STATE_RESPONSE      1
+#define STATE_HEADERS       2
+#define STATE_BODY          3
+#define STATE_EOF           4
 
 #define MAX_HEADERS         128
 
@@ -25,6 +27,7 @@ static Http METHOD_IMPL(construct)
 {
     SUPER_CALL(Object, this, construct);
     this->buffer = (StringIO)NEW(MemStringIO);
+    this->msg.headers = (char***)malloc(128 * sizeof(char**));
     return this;
 }
 
@@ -109,6 +112,7 @@ static void METHOD_IMPL(read_headers, buffer *b)
                 if(line_len == strlen(state->needle))
                 {
                     DPRINTF("end of headers found\n");
+                    this->state = STATE_BODY;
                 }
 
                 char *hdr_str = (char*)malloc(line_len);
@@ -121,21 +125,58 @@ static void METHOD_IMPL(read_headers, buffer *b)
                 CALL(this->buffer, rtruncate, 
                     end - line_len);
 
-                char *name = hdr_str, *value = NULL, *i;
-                for(i = hdr_str;*i != '\0';i++)
+                if(this->state == STATE_REQUEST)
                 {
-                    if(*i == ':')
-                    {
-                        *i = '\0';
-                        value = i+1;
-                        break;
-                    }
+                    char *request_type = strtok(hdr_str, " \t");
+                    char *request_path = strtok(NULL, " \t");
+                    char *http_version = strtok(NULL, " \t");
+                    this->msg.request_type = strdup(request_type);
+                    this->msg.request_path = strdup(request_path);
+                    this->msg.http_version = strdup(http_version);
+                    this->state = STATE_HEADERS;
+                    DPRINTF("request: %s %s %s\n",
+                            request_type,
+                            request_path,
+                            http_version);
                 }
-                if(value)
+                else if(this->state == STATE_RESPONSE)
                 {
-                    for(;(*value == ' '  || *value == '\t') &&  
-                          *value != '\0'; value++);
-    //                DPRINTF("new headers: %s: %s\n", name, value);
+                    char *http_version = strtok(hdr_str, " \t");
+                    char *response_code = strtok(NULL, " \t");
+                    char *response_msg = strtok(NULL, " \t");
+                    //ASSERT(strcmp(http_version, this->msg.http_version) == 0);
+                    this->msg.response_code = strtoll(response_code, NULL, 0);
+                    this->msg.response_msg = strdup(response_msg);
+                    this->state = STATE_HEADERS;
+                    DPRINTF("response: %s %d %s\n",
+                            http_version,
+                            this->msg.response_code,
+                            response_msg);
+                }
+                else
+                {
+                    char *name = hdr_str, *value = NULL, *i;
+                    for(i = hdr_str;*i != '\0';i++)
+                    {
+                        if(*i == ':')
+                        {
+                            *i = '\0';
+                            value = i+1;
+                            break;
+                        }
+                    }
+                    if(value)
+                    {
+                        for(;(*value == ' '  || *value == '\t') &&  
+                              *value != '\0'; value++);
+                        this->msg.headers[this->msg.header_count] =
+                            (char**)malloc(2 * sizeof(char*));
+                        this->msg.headers[this->msg.header_count][0] =
+                            strdup(name);
+                        this->msg.headers[this->msg.header_count][1] =
+                            strdup(value);
+                        this->msg.header_count++;
+                    }
                 }
                 free(hdr_str);
                 state->pos = 0;
@@ -152,8 +193,11 @@ static void METHOD_IMPL(read_headers, buffer *b)
 
 static void METHOD_IMPL(feed_data, buffer *b)
 {
+    DPRINTF("state: %d\n", this->state);
     switch(this->state)
     {
+    case STATE_REQUEST:
+    case STATE_RESPONSE:
     case STATE_HEADERS:
         PRIV_CALL(this, read_headers, b);
         break;
@@ -162,10 +206,10 @@ static void METHOD_IMPL(feed_data, buffer *b)
 
 static char ***METHOD_IMPL(get_headers, int *header_count)
 {
-    if(this->state == STATE_HEADERS)
+    if(this->state <= STATE_HEADERS)
         return NULL;
-    *header_count = this->header_count;
-    return this->headers;
+    *header_count = this->msg.header_count;
+    return this->msg.headers;
 }
 
 VIRTUAL(Object)
@@ -176,7 +220,8 @@ VIRTUAL(Object)
 
     VFIELD(buffer) = NULL;
     VFIELD(search) = NULL;
-    VFIELD(state) = STATE_HEADERS;
-    VFIELD(header_count) = 0;
+    VFIELD(state) = STATE_REQUEST;
+    memset(&this->msg, '\0', sizeof(struct http_message));
 END_VIRTUAL
 #undef CLASS_NAME // Http
+
